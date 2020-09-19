@@ -1,0 +1,431 @@
+---
+title: "WGCNA"
+author: "Bridget Bai"
+date: "3/31/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#libraries
+```{r}
+library(gplots)
+library(ggplot2)
+library(WGCNA)
+options(stringsAsFactors = FALSE)
+library(AnnotationDbi)
+library(topGO)
+library(viridis)
+```
+
+####prepare data for analysis
+
+#import protein data 
+```{r}
+df_WGCNA <- read.csv("~/Desktop/rotation_Briggs/groups_organized.csv", header = TRUE, stringsAsFactors = FALSE)
+df_sub <- df_WGCNA[,c(1,4:18)]
+
+df_sub <- df_sub[!df_sub$B317 == "#DIV/0!", ]
+df_sub <- df_sub[!df_sub$B21 == "#DIV/0!", ]
+df_sub <- df_sub[!df_sub$B14 == "#DIV/0!", ]
+df_sub <- df_sub[!df_sub$BM_6 == "#DIV/0!", ]
+df_sub <- df_sub[!df_sub$B16 == "#DIV/0!", ]
+df_sub <- df_sub[!df_sub$BM == "#DIV/0!", ]
+
+rownames(df_sub) <- df_sub$Accession
+df_sub[,2:16] <- lapply(df_sub[,2:16], as.numeric)
+df_sub <- df_sub[, -1]
+df_sub <- data.frame(t(df_sub))
+#df_sub[,1:3920] <- lapply(df_sub[,1:3920], as.numeric)
+```
+#import traits file 
+```{r}
+hyb_traits <- read.csv("HMP_traits.csv", header = TRUE, stringsAsFactors = FALSE)
+rownames(hyb_traits) <- hyb_traits$sample
+
+barplot(hyb_traits$plant.height,space = 0)
+```
+
+#pick soft-thresholding powers
+```{r}
+WGCNA_plot1=function(df_sub){
+    # Choose a set of soft-thresholding powers
+    powers = c(c(4:16), seq(from = 18, to=25, by=2))
+    # Call the network topology analysis function
+    sft = WGCNA::pickSoftThreshold(df_sub, powerVector = powers, verbose = 5)
+
+    #plot
+    require(repr)
+    tiff('pick_beta_power.tiff', units = "in", width = 8, height = 6, res = 300, compression = "lzw")
+    options(repr.plot.width=9, repr.plot.height=4)
+    par(mfrow = c(1,2));
+    cex1 = 0.9;
+    plot(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+    xlab="Soft Threshold (power)",ylab="Scale Free Topology Model Fit,signed R^2",type="n",
+    main = paste("Scale independence"));
+    text(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+    labels=powers,cex=cex1,col="red");
+    # this line corresponds to using an R^2 cut-off of h
+    abline(h=0.89,col="red")
+    # Mean connectivity as a function of the soft-thresholding power
+    plot(sft$fitIndices[,1], sft$fitIndices[,5],
+    xlab="Soft Threshold (power)",ylab="Mean Connectivity", type="n",
+    main = paste("Mean connectivity"))
+    text(sft$fitIndices[,1], sft$fitIndices[,5], labels=powers, cex=cex1,col="red")
+    dev.off()
+}
+
+WGCNA_plot1(df_sub)
+#softpower = 12
+```
+
+####generate network and module
+
+#calculate adjacency 
+```{r}
+softPower = 12 #see figure in last chunk
+adjacency <-WGCNA::adjacency(df_sub, power = softPower, type = "signed")
+```
+
+#topological overlap matrix
+```{r}
+#turn adjacency into topological overlap
+dissTOM <-  TOMdist(adjacency)
+```
+
+#clustering using TOM
+```{r}
+# hierarchical clustering
+geneTree = hclust(as.dist(dissTOM), method = "average")
+# define the modules by cutting branches
+moduleLabelsManual1 = cutreeDynamic(dendro = geneTree, distM = dissTOM, method = "hybrid", 
+    deepSplit = 2, pamRespectsDendro = F, minClusterSize = 30)
+moduleColorsManual1 = labels2colors(moduleLabelsManual1)
+```
+
+#calculate eigengenes and merge modules based on similar expression profiles
+```{r}
+# Calculate eigengenes
+MEList <- moduleEigengenes(df_sub, colors = moduleColorsManual1)
+MEs <- MEList$eigengenes
+
+#cut tree to merge modules
+MEDissThres = 0.15
+# Call an automatic merging function
+merge = mergeCloseModules(df_sub, moduleColorsManual1, cutHeight = MEDissThres)
+# The merged module colors
+mergedColors = merge$colors
+# Eigengenes of the new merged modules:
+mergedMEs = merge$newMEs
+```
+
+#quantifying module-trait association
+```{r}
+moduleColors = mergedColors
+
+# Define numbers of genes and samples
+nGenes = ncol(df_sub)
+nSamples = nrow(df_sub)
+# Recalculate MEs with color labels
+MEs0 = moduleEigengenes(df_sub, moduleColors)$eigengenes
+MEs = orderMEs(MEs0)
+
+moduleTraitCor = cor(MEs,hyb_traits$plant.height ,use = "p")
+moduleTraitPvalue = corPvalueStudent(moduleTraitCor, nSamples)
+
+#summarize correlation and p-value for all modules
+moduleTrait_summary <- cbind(moduleTraitCor, moduleTraitPvalue)
+colnames(moduleTrait_summary) <- c("Correlation_height","P-value")
+write.csv(moduleTrait_summary, "moduleTrait_summary.csv")
+```
+
+#module-trait heatmap
+````{r}
+
+MET = orderMEs(cbind(mergedMEs[, c("MEturquoise","MEred","MEyellow","MEbrown","MEgreen")], hyb_traits$plant.height))
+colnames(MET)[4] <- "plant height"
+MET_matrix <- cor(MET,MET)     
+MET_matrix_pvalue <- corPvalueStudent(MET_matrix, nSamples)
+
+textMatrix = paste(signif(MET_matrix, 2), "\n(",
+                        signif(MET_matrix_pvalue, 1), ")", sep = "")  
+
+tiff('module_height_heatmap.tiff', units = "in", width = 10, height = 6, res = 300, compression = "lzw")
+par(mar = c(6, 7, 2, 1))
+labeledHeatmap(met_matrix,xLabels = c("MEturquoise","MEred","MEyellow","plant height","MEbrown","MEgreen"),yLabels = c("MEturquoise","MEred","MEyellow","plant height","MEbrown","MEgreen"),colorLabels = FALSE,
+             colors = viridis(30,alpha = 0.8,begin = 0.4,end = 1),
+             textMatrix = textMatrix,
+             setStdMargins = FALSE,
+             cex.text = 1,
+             ySymbols = c("404","214","295","","314","246"),xSymbols =c("404","214","295","","314","246"))
+```
+
+# calculate the module membership values (aka. module eigengene based connectivity kME) & Gene Significance
+```{r}
+datKME = signedKME(df_sub, MEs)
+modNames = substring(names(datKME), 4)
+G.S_height = as.numeric(cor(df_sub, hyb_traits$plant.height, use = "p"))
+
+par(mfrow = c(2, 2))
+selectModules = c("yellow", "red", "turquoise", "brown", "green")
+for (module in selectModules) {
+    column = match(module, modNames)
+    restModule = moduleColors == module
+    tiff(paste0("MM_vs_GS",module,".tiff"), units = "in", width = 10, height = 6, res = 300, compression = "lzw")
+    verboseScatterplot(datKME[restModule, column], G.S_height[restModule], xlab = paste("Module Membership ", 
+        module, "module"), ylab = "GS.plant.height", main = paste("kME.", module, 
+        "vs. GS"), col = module,cex.lab = 1,cex.main = 0.8,cex.axis = 1)
+    dev.off()
+}
+```
+
+#write module data to file
+```{r}
+probes = colnames(df_sub)
+probes2annot = match(probes, df_WGCNA$Accession)
+sum(is.na(probes2annot))
+datGS.Traits = data.frame(cor(df_sub, hyb_traits$plant.height, use = "p"))
+colnames(datGS.Traits) <- "geneTraitSignificance"
+datOutput = data.frame(ProbeID = probes, moduleColors, datKME, datGS.Traits)
+write.csv(datOutput,file = "WGCNA_leaf_summary.csv")
+```
+
+#read in protein annotation files
+```{r}
+SL_GOI <- read.csv(file = "~/Desktop/rotation_Briggs/FinalLeafGOIs.csv", header = TRUE, stringsAsFactors = FALSE)
+```
+
+#merge individual module with annotation
+```{r}
+merge_module_GO <- function(a,b){
+  df_1 <- datOutput[datOutput$moduleColors == a, c("ProbeID","moduleColors","geneTraitSignificance",b)]
+  df_2 <- merge.data.frame(x = df_1, y = SL_GOI[, c("Accession","Protein","Category","GOterm","KeggPathway")], by.x = "ProbeID", by.y  = "Accession")  
+  df_2 <- unique(df_2)
+  df_2 <- df_2[order(df_2[,b],decreasing = TRUE), ]
+  df_2$Gene <- substr(df_2$ProbeID, start = 1, stop = 14)
+  df_2 <- df_2[-(grep("only",df_2[,"ProbeID"])), ]
+  df_2
+}
+
+yellow <- merge_module_GO(a = "yellow",b = "kMEyellow")
+brown <- merge_module_GO(a = "brown", b = "kMEbrown")
+turquoise <- merge_module_GO(a = "turquoise", b = "kMEturquoise")
+green <- merge_module_GO(a = "green", b = "kMEgreen")
+red <- merge_module_GO(a = "red", b = "kMEred")
+
+
+```
+
+
+
+#separate top modules 
+```{r}
+yellow <- merge_module_GO(a = "yellow",b = "kMEyellow")
+brown <- merge_module_GO(a = "brown", b = "kMEbrown")
+turquoise <- merge_module_GO(a = "turquoise", b = "kMEturquoise")
+green <- merge_module_GO(a = "green", b = "kMEgreen")
+red <- merge_module_GO(a = "red", b = "kMEred")
+
+#hub_genes <- data.frame(rbind(brown,turquoise,red,yellow,green))
+hub_genes <- data.frame(rbind(hub_genes,blue))
+#write.csv(hub_genes, file = "hub_genes.csv")
+module_gene <- data.frame(rbind(yellow,brown,turquoise,green,red))
+write.csv(module_gene,file = "module_gene.csv")
+
+#mean(green$geneTraitSignificance)
+```
+
+#load gamer
+```{r}
+GAMER <- read.delim("~/Desktop/rotation_Briggs/Mt_analysis/maize.B73.AGPv4.aggregate.gaf", sep = "\t", header = FALSE, stringsAsFactors = F)
+colnames(GAMER) <- c("db", "db_object_id", "db_object_symbol", "qualifier", "term_accession", "db_reference", "evidence_code", "with", "aspect", "db_object_name", "db_object_synonym", "db_object_type", "taxon", "date", "assigned_by", "annotation_extension", "gene_product_form_id")
+gamer <- GAMER[-(1:2),]
+gamer$Term <- Term(as.character(gamer$term_accession))
+gamercut <- gamer[gamer$db_object_id %in% df_sub$gene, ]
+```
+#GO function
+```{r}
+GOanalysisGodata <- function(EnrichedDF, GamerCut, ont, nodesize = 1){
+  gene2GO_TissueCut <- split((as.character(GamerCut$term_accession)),GamerCut$db_object_id)
+  gene2GOb_TissueCut <- gene2GO_TissueCut[-2]
+  str(head(gene2GOb_TissueCut))
+  geneNames_tissuecut <- names(gene2GOb_TissueCut)
+  myInterestingGenes <- EnrichedDF$Gene
+  geneList <- factor(as.integer(geneNames_tissuecut %in% myInterestingGenes))
+  names(geneList) <- geneNames_tissuecut
+  GOdata <- new("topGOdata", ontology = ont, allGenes = geneList, annot = annFUN.gene2GO, nodeSize=nodesize, gene2GO = gene2GOb_TissueCut)
+  GOdata
+}
+
+
+```
+
+
+#GO term enrichment 
+```{r}
+#yellow
+yellow_go_bp <- GOanalysisGodata(yellow, gamercut, "BP", nodesize = 5)
+yellow_go_cc <- GOanalysisGodata(yellow, gamercut, "CC", nodesize = 5)
+yellow_go_mf <- GOanalysisGodata(yellow, gamercut, "MF", nodesize = 5)
+yellow_bp_stats <- GOanalysisDF(yellow_go_bp,"yellow")
+yellow_cc_stats <- GOanalysisDF(yellow_go_cc,"yellow")
+yellow_mf_stats <- GOanalysisDF(yellow_go_mf,"yellow")
+yellow_go_stats <- rbind(yellow_bp_stats, yellow_cc_stats, yellow_mf_stats)
+
+
+#green
+green_go_bp <- GOanalysisGodata(green, gamercut, "BP", nodesize = 5)
+green_go_cc <- GOanalysisGodata(green, gamercut, "CC", nodesize = 5)
+green_go_mf <- GOanalysisGodata(green, gamercut, "MF", nodesize = 5)
+green_bp_stats <- GOanalysisDF(green_go_bp, "green")
+green_cc_stats <- GOanalysisDF(green_go_cc, "green")
+green_mf_stats <- GOanalysisDF(green_go_mf, "green")
+green_go_stats <- rbind(green_bp_stats, green_cc_stats, green_mf_stats)
+
+
+#turquoise
+turquoise_go_bp <- GOanalysisGodata(turquoise, gamercut, "BP", nodesize = 5)
+turquoise_go_cc <- GOanalysisGodata(turquoise, gamercut, "CC", nodesize = 5)
+turquoise_go_mf <- GOanalysisGodata(turquoise, gamercut, "MF", nodesize = 5)
+turquoise_bp_stats <- GOanalysisDF(turquoise_go_bp,"turquoise")
+turquoise_cc_stats <- GOanalysisDF(turquoise_go_cc,"turquoise")
+turquoise_mf_stats <- GOanalysisDF(turquoise_go_mf,"turquoise")
+turquoise_go_stats <- rbind(turquoise_bp_stats, turquoise_cc_stats, turquoise_mf_stats)
+
+
+red_go_bp <- GOanalysisGodata(red, gamercut, "BP", nodesize = 5)
+red_go_cc <- GOanalysisGodata(red, gamercut, "CC", nodesize = 5)
+red_go_mf <- GOanalysisGodata(red, gamercut, "MF", nodesize = 5)
+red_bp_stats <- GOanalysisDF(red_go_bp,"red")
+red_cc_stats <- GOanalysisDF(red_go_cc,"red")
+red_mf_stats <- GOanalysisDF(red_go_mf,"red")
+red_go_stats <- rbind(red_bp_stats, red_cc_stats, red_mf_stats)
+
+#brown
+brown_go_bp <- GOanalysisGodata(brown, gamercut, "BP", nodesize = 5)
+brown_go_cc <- GOanalysisGodata(brown, gamercut, "CC", nodesize = 5)
+brown_go_mf <- GOanalysisGodata(brown, gamercut, "MF", nodesize = 5)
+brown_bp_stats <- GOanalysisDF(brown_go_bp,"brown")
+brown_cc_stats <- GOanalysisDF(brown_go_cc,"brown")
+brown_mf_stats <- GOanalysisDF(brown_go_mf,"brown")
+brown_go_stats <- rbind(brown_bp_stats, brown_cc_stats, brown_mf_stats)
+
+GO_Summary_WGCNA <- rbind(yellow_go_stats, green_go_stats, turquoise_go_stats, red_go_stats, brown_go_stats)
+write.csv(GO_Summary_WGCNA, file = "GO_Summary_WGCNA.csv")
+```
+
+#find hub genes
+```{r}
+find_hub_gene <- function(df, modulekME){
+  df <- df[!(abs(df[,modulekME]) <= 0.9), ]
+  df <- df[!(abs(df[,"geneTraitSignificance"]) <= 0.5), ]
+  colnames(df)[4] <- "module membership"
+  df
+}
+
+yellow_hub <- find_hub_gene(yellow, "kMEyellow")
+red_hub <- find_hub_gene(red, "kMEred")
+green_hub <- find_hub_gene(green, "kMEgreen")
+brown_hub <- find_hub_gene(brown, "kMEbrown")
+turquoise_hub <- find_hub_gene(turquoise, "kMEturquoise")
+
+hub_genes <- data.frame(rbind(yellow_hub, red_hub, green_hub, brown_hub, turquoise_hub))
+write.csv(hub_genes, "hub_genes_WGCNA.csv")  
+```
+
+#export to cytoscape
+```{r}
+modules = c("yellow", "red","turquoise","brown","green")
+inModule = is.finite(match(moduleColors, modules))
+modProbes = probes[inModule]
+modTOM = adjacency[inModule, inModule]
+dimnames(modTOM) = list(modProbes, modProbes)
+cyt = exportNetworkToCytoscape(modTOM, weighted = TRUE, nodeAttr = moduleColors[inModule])
+node_data <- cyt$nodeData
+edge_data <- cyt$edgeData
+write.csv(edge_data,"cytoscape_edge_input.csv")
+write.csv(node_data,"cytoscape_node_input.csv")
+```
+
+#heatmap to compare between hybrids
+```{r}
+df_sub_1 <- df_sub
+rownames(df_sub_1) <- c("BM","MB","B84B","B84M","A682B","A682M","RIL_BM","14B","14M","16B","16M","21B","21M","317B","317M")
+rownames(df_sub_1)[1:6] <- paste0("6hybrid_",rownames(df_sub_1)[1:6])
+rownames(df_sub_1)[8:15] <- paste0("RIL_",rownames(df_sub_1)[8:15])
+
+adjust_range <- function(a){
+  if (a < 0.9){
+    a = 0.9
+  }else if
+   (a > 1.2){
+    a = 1.2
+   }
+  a
+}
+
+#hub gene heatmap
+hub_gene_select <- hub_genes$ProbeID
+df_sub_hub <- df_sub_1[,hub_gene_select]
+hub_colors <- hub_genes$moduleColors
+df_sub_hub_adjusted <- apply(df_sub_hub,c(1,2),adjust_range)
+df_sub_interest_hub_ordered <- df_sub_hub_adjusted[c(9,10,11,13,15,7,3,6,1,2,4,5,8,12,14),]
+
+
+colors = seq(0.9,1.2,length = 101)
+my_palette <- colorRampPalette(c("yellow","gray","darkblue"))(n = 100)
+par(mar = c(5,25,3,10))
+heatmap.2(df_sub_hub_adjusted_ordered, Colv = T,reorderfun=function(d,w) reorder(d,w,agglo.FUN = mean),rowsep = c(4,12),dendrogram = "both",scale = "none", trace = "none",ColSideColors = hub_colors, density.info = "none", col = my_palette, breaks = colors,cexRow = 1.2,offsetCol = 0,offsetRow = -0.4, margins = c(7,7.5), labCol = NA, keysize = 1.5,key.xlab = "HYB/MP",key.xtickfun=function() {
+               cex <- par("cex")*par("cex.axis")
+               side <- 1
+               line <- 0
+               col <- par("col.axis")
+               font <- par("font.axis")
+               mtext("<0.9", side=side, at=0, adj=0,
+                     line=line, cex=cex, col=col, font=font)
+              mtext("1", side=side, at=0.5, adj=0.5,
+                     line=line, cex=cex, col=col, font=font)
+               mtext(">1.2", side=side, at=1, adj=1,
+                     line=line, cex=cex, col=col, font=font)
+               return(list(labels=FALSE, tick=FALSE))
+          })
+
+#all gene heatmap
+
+df_sub_all_gene <- df_sub_1[,inModule]
+df_sub_all_gene <- df_sub_all_gene[,-grep("only",colnames(df_sub_all_gene))]
+select_colors <- moduleColors[inModule]
+select_colors <- select_colors[-grep("only",modProbes)]
+df_sub_all_adjusted <- apply(df_sub_all_gene,c(1,2),adjust_range)
+df_sub_all_ordered <- df_sub_all_adjusted[c(9,10,11,13,15,7,3,6,1,2,4,5,8,12,14),]
+
+par(mar = c(5,25,3,10))
+heatmap.2(df_sub_all_ordered, Colv = T,reorderfun=function(d,w) reorder(d,w,agglo.FUN = mean),rowsep = c(4,12),dendrogram = "both",scale = "none", trace = "none",ColSideColors = select_colors, density.info = "none", col = my_palette, breaks = colors,cexRow = 1.2,offsetCol = 0,offsetRow = -0.4, margins = c(7,7.5), labCol = NA, keysize = 1.5,key.xlab = "HYB/MP",key.xtickfun=function() {
+               cex <- par("cex")*par("cex.axis")
+               side <- 1
+               line <- 0
+               col <- par("col.axis")
+               font <- par("font.axis")
+               mtext("<0.9", side=side, at=0, adj=0,
+                     line=line, cex=cex, col=col, font=font)
+              mtext("1", side=side, at=0.5, adj=0.5,
+                     line=line, cex=cex, col=col, font=font)
+               mtext(">1.2", side=side, at=1, adj=1,
+                     line=line, cex=cex, col=col, font=font)
+               return(list(labels=FALSE, tick=FALSE))
+          })
+
+
+
+
+
+#barplots to merge with heatmap
+hyb_traits_reordered <- hyb_traits[c(5,4,2,1,15,11,9,10,13,3,6,7,12,14,8),]
+par(mar = c(3,5,3,2))
+barplot(hyb_traits_reordered$plant.height, ylab = "HYB/MP Plant Height",
+col = c("black","black","black","black","gray","gray","gray","gray","gray","gray","gray","gray","white","white","white"), font.lab = 2, cex.axis = 1.6, cex.lab = 2)
+
+```
+
